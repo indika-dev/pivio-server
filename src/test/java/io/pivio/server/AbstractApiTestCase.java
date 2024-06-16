@@ -2,8 +2,8 @@ package io.pivio.server;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.pivio.server.changeset.Changeset;
 import io.pivio.server.document.PivioDocument;
+import io.pivio.server.elasticsearch.Changeset;
 import org.junit.Before;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;

@@ -1,0 +1,63 @@
+{
+  "steckbrief": {
+    "aliases": {},
+    "mappings": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "short_name": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "vcsroot": {
+          "type": "string"
+        },
+        "links": {
+          "type": "object"
+        },
+        "software_dependencies": {
+          "type": "nested",
+          "include_in_all": true,
+          "properties": {
+            "name": {
+              "type": "string",
+              "analyzer": "simple"
+            },
+            "version": {
+              "type": "string"
+            },
+            "licenses": {
+              "type": "nested",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "fullName": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "settings": {
+      "index": {
+        "number_of_shards": 1,
+        "number_of_replicas": 1
+      }
+    }
+  }
+}

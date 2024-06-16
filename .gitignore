@@ -1,16 +1,33 @@
-*.class
+HELP.md
 target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
 
-# Package Files #
-*.jar
-*.war
-*.ear
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
 
-.gradle/
-.idea/
-build/
+### IntelliJ IDEA ###
+.idea
+*.iws
 *.iml
+*.ipr
 
-data/
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
 
-.DS_Store
+### VS Code ###
+.vscode/

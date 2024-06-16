@@ -1,211 +1,273 @@
 package io.pivio.server.document;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.JsonNodeType;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.pivio.server.changeset.Changeset;
-import io.pivio.server.changeset.ChangesetService;
-import org.elasticsearch.action.deletebyquery.DeleteByQueryAction;
-import org.elasticsearch.action.deletebyquery.DeleteByQueryRequestBuilder;
-import org.elasticsearch.action.get.GetResponse;
-import org.elasticsearch.client.Client;
-import org.elasticsearch.index.query.QueryBuilders;
-import org.joda.time.format.ISODateTimeFormat;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.actuate.metrics.CounterService;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.util.StringUtils;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.web.util.UriComponentsBuilder;
-
 import java.io.IOException;
+import java.net.HttpURLConnection;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
+import org.joda.time.format.ISODateTimeFormat;
+import org.opensearch.client.opensearch.OpenSearchClient;
+import org.opensearch.client.opensearch._types.OpenSearchException;
+import org.opensearch.client.opensearch._types.Result;
+import org.opensearch.client.opensearch._types.query_dsl.IdsQuery;
+import org.opensearch.client.opensearch._types.query_dsl.Query;
+import org.opensearch.client.opensearch.core.DeleteRequest;
+import org.opensearch.client.opensearch.core.DeleteResponse;
+import org.opensearch.client.opensearch.core.IndexRequest;
+import org.opensearch.client.opensearch.core.IndexResponse;
+import org.opensearch.client.opensearch.core.SearchRequest;
+import org.opensearch.client.opensearch.core.SearchResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.util.UriComponentsBuilder;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeType;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.pivio.server.changeset.ChangesetRepository;
+import io.pivio.server.changeset.ChangesetService;
+import io.pivio.server.changeset.DocumentNotFoundException;
+import io.pivio.server.elasticsearch.Changeset;
 
 @CrossOrigin
 @RestController
 @RequestMapping(value = "/document")
 public class DocumentController {
 
-    private static final Logger LOG = LoggerFactory.getLogger(DocumentController.class);
+  private static final Logger LOG = LoggerFactory.getLogger(DocumentController.class);
 
-    private final Client client;
-    private final ChangesetService changesetService;
-    private final ObjectMapper mapper;
-    private final List<String> mandatoryFields;
+  private final ChangesetRepository changesetRepository;
+  private final DocumentRepository repository;
+  private final ChangesetService changesetService;
+  private final List<String> mandatoryFields;
+  private final JsonMapper mapper;
+  private final OpenSearchClient client;
 
-    @Autowired
-    public ObjectMapper objectMapper;
+  @Autowired
+  public ObjectMapper objectMapper;
 
-    private CounterService counterService;
+  private Counter postDocumentCallsCounter;
+  private Counter deleteDocumentCallCounter;
+  private Counter getDocumentCallsCounter;
 
-    public DocumentController(Client client, ChangesetService changesetService, ObjectMapper mapper, CounterService counterService) {
-        this.client = client;
-        this.changesetService = changesetService;
-        this.mapper = mapper;
-        this.counterService = counterService;
-        mandatoryFields = Arrays.asList("id", "type", "name", "owner", "description");
+  public DocumentController(DocumentRepository repository, ChangesetRepository changesetRepository,
+      ChangesetService changesetService, JsonMapper mapper, MeterRegistry registry,
+      OpenSearchClient client) {
+    this.changesetRepository = changesetRepository;
+    this.client = client;
+    this.repository = repository;
+    this.changesetService = changesetService;
+    this.mapper = mapper;
+    this.postDocumentCallsCounter = registry.counter("counter.calls.document.post");
+    this.deleteDocumentCallCounter = registry.counter("counter.calls.document.id.delete");
+    this.getDocumentCallsCounter = registry.counter("counter.calls.document.id.get");
+    mandatoryFields = Arrays.asList("id", "type", "name", "owner", "description");
+  }
+
+  @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE,
+      produces = MediaType.APPLICATION_JSON_VALUE)
+  public ResponseEntity<String> create(@RequestBody ObjectNode document,
+      UriComponentsBuilder uriBuilder) throws IOException {
+    postDocumentCallsCounter.increment();
+    if (isIdMissingOrEmpty(document)) {
+      throw new DocumentNotFoundException(mapper.writeValueAsString(missingIdError(document)));
     }
 
-    @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity create(@RequestBody ObjectNode document, UriComponentsBuilder uriBuilder) throws IOException {
-        counterService.increment("counter.calls.document.post");
-        if (isIdMissingOrEmpty(document)) {
-            return ResponseEntity.badRequest().body(missingIdError(document));
-        }
-
-        if (isMandatoryFieldMissingOrEmpty(document)) {
-            return ResponseEntity.badRequest().body(missingMandatoryField(document));
-        }
-
-        removeNullNodes(document);
-
-
-        final Changeset changeset = changesetService.computeNext(document);
-        final String documentId = document.get("id").asText();
-        final GetResponse persistedPivioDocument = client.prepareGet("steckbrief", "steckbrief", documentId)
-                .execute()
-                .actionGet();
-
-        final String formattedChangeTime = ISODateTimeFormat.dateTime().print(changeset.getTimestamp());
-        if (persistedPivioDocument.isExists()) {
-            JsonNode persistentPivioDocumentJson = mapper.readTree(persistedPivioDocument.getSourceAsString());
-            document.put("created", getFieldOrElse(persistentPivioDocumentJson, "created", formattedChangeTime));
-            document.put("lastUpload", ISODateTimeFormat.dateTime().print(changeset.getTimestamp()));
-            if (changeset.isEmpty()) {
-                document.put("lastUpdate", getFieldOrElse(persistentPivioDocumentJson, "lastUpdate", formattedChangeTime));
-            }
-            else {
-                document.put("lastUpdate", formattedChangeTime);
-            }
-        }
-        else {
-            document.put("created", formattedChangeTime);
-            document.put("lastUpdate", formattedChangeTime);
-            document.put("lastUpload", formattedChangeTime);
-        }
-
-        client.prepareIndex("steckbrief", "steckbrief", documentId)
-                .setSource(document.toString())
-                .execute()
-                .actionGet();
-
-        if (changeset.isNotEmpty()) {
-            client.prepareIndex("changeset", "changeset")
-                    .setSource(mapper.writeValueAsString(changeset))
-                    .setCreate(true)
-                    .execute()
-                    .actionGet();
-        }
-
-        LOG.info("Indexed document {} for {}", documentId, document.get("name").asText());
-        return ResponseEntity.created(uriBuilder.path("/document/{documentId}").buildAndExpand(documentId).toUri()).build();
+    if (isMandatoryFieldMissingOrEmpty(document)) {
+      throw new MandatoryFieldMissingOrEmptyException(
+          mapper.writeValueAsString(missingMandatoryField(document)));
     }
 
-    private JsonNode removeNullNodes(JsonNode node) {
-        Iterator<JsonNode> iterator = node.iterator();
-        while (iterator.hasNext()) {
-            JsonNode next = iterator.next();
-            if (next.getNodeType().equals(JsonNodeType.NULL)) {
-                iterator.remove();
-            }
-            if (next.getNodeType().equals(JsonNodeType.ARRAY) || next.getNodeType().equals(JsonNodeType.OBJECT)) {
-                JsonNode jsonNode = removeNullNodes(next);
-                if (!jsonNode.iterator().hasNext()) {
-                    iterator.remove();
-                }
-            }
+    removeNullNodes(document);
+
+
+    final Changeset changeset = changesetService.computeNext(document);
+    final String documentId = document.get("id").asText();
+    final Optional<Changeset> existingPivioDocument = changesetRepository.findById(documentId);
+
+    final String formattedChangeTime = ISODateTimeFormat.dateTime().print(changeset.getTimestamp());
+    existingPivioDocument.ifPresentOrElse(persistedPivioDocument -> {
+      JsonNode persistentPivioDocumentJson = mapper.valueToTree(persistedPivioDocument);
+      document.put("created",
+          getFieldOrElse(persistentPivioDocumentJson, "created", formattedChangeTime));
+      document.put("lastUpload", ISODateTimeFormat.dateTime().print(changeset.getTimestamp()));
+      if (changeset.isEmpty()) {
+        document.put("lastUpdate",
+            getFieldOrElse(persistentPivioDocumentJson, "lastUpdate", formattedChangeTime));
+      } else {
+        document.put("lastUpdate", formattedChangeTime);
+      }
+    }, () -> {
+      document.put("created", formattedChangeTime);
+      document.put("lastUpdate", formattedChangeTime);
+      document.put("lastUpload", formattedChangeTime);
+    });
+    IndexRequest<Object> indexRequest = new IndexRequest.Builder<>().index("steckbrief")
+        .id(document.get("id").textValue()).document(document).build();
+    IndexResponse indexResponse = client.index(indexRequest);
+    switch (indexResponse.result()) {
+      case NoOp:
+      case NotFound:
+        throw new DocumentNotFoundException(
+            document.get("id") + " wasn't indexed successfully: " + indexResponse.result());
+      case Created:
+      case Updated:
+      case Deleted:
+        LOG.info("indexed {} successfully with result: {}", document.get("id"),
+            indexResponse.result());
+    }
+    PivioDocument persistedPivioDocument =
+        repository.save(mapper.treeToValue(document, PivioDocument.class));
+    if (!changeset.isEmpty()) {
+      IndexRequest<Object> changesetIndexRequest = new IndexRequest.Builder<>().index("changeset")
+          .document(mapper.writeValueAsString(changeset)).build();
+      IndexResponse changesetIndexResponse = client.index(changesetIndexRequest);
+      switch (changesetIndexResponse.result()) {
+        case NoOp:
+        case NotFound:
+          throw new DocumentNotFoundException(
+              document.get("id") + " wasn't indexed successfully: " + indexResponse.result());
+        case Created:
+        case Updated:
+        case Deleted:
+          LOG.info("indexed {} successfully with result: {}", document.get("id"),
+              indexResponse.result());
+      }
+    }
+    // LOG.info("Indexed document {} for {}", documentId, document.get("name").asText());
+    return ResponseEntity
+        .created(uriBuilder.path("/document/{documentId}").buildAndExpand(documentId).toUri())
+        .build();
+  }
+
+  private JsonNode removeNullNodes(JsonNode node) {
+    Iterator<JsonNode> iterator = node.iterator();
+    while (iterator.hasNext()) {
+      JsonNode next = iterator.next();
+      if (next.getNodeType().equals(JsonNodeType.NULL)) {
+        iterator.remove();
+      }
+      if (next.getNodeType().equals(JsonNodeType.ARRAY)
+          || next.getNodeType().equals(JsonNodeType.OBJECT)) {
+        JsonNode jsonNode = removeNullNodes(next);
+        if (!jsonNode.iterator().hasNext()) {
+          iterator.remove();
         }
-        return node;
+      }
     }
+    return node;
+  }
 
-    private JsonNode missingMandatoryField(JsonNode document) {
-        ObjectNode error = mapper.createObjectNode();
-        String missingMandatoryField = getMissingMandatoryField(document);
-        if (missingMandatoryField != null) {
-            LOG.info("Received document with missing mandatory field in {}", document.toString());
-            error.put("error", "mandatory field '" + missingMandatoryField + "' is missing");
+  private JsonNode missingMandatoryField(JsonNode document) {
+    ObjectNode error = mapper.createObjectNode();
+    String missingMandatoryField = getMissingMandatoryField(document);
+    if (missingMandatoryField != null) {
+      LOG.info("Received document with missing mandatory field in {}", document.toString());
+      error.put("error", "mandatory field '" + missingMandatoryField + "' is missing");
+    } else {
+      LOG.info("Received document with empty mandatory field in {}", document.toString());
+      error.put("error", "mandatory field '" + getEmptyMandatoryField(document) + "' is empty");
+    }
+    return error;
+  }
+
+  private JsonNode missingIdError(JsonNode document) {
+    LOG.info("Received document without or with empty id field in {}", document.toString());
+    ObjectNode newId = mapper.createObjectNode();
+    newId.put("id", UUID.randomUUID().toString());
+    return newId;
+  }
+
+  private boolean isIdMissingOrEmpty(JsonNode document) {
+    return document.get("id") == null || document.get("id").asText("") == null;
+  }
+
+  private String getFieldOrElse(JsonNode json, String fieldName, String defaultValue) {
+    return json.has(fieldName) ? json.get(fieldName).textValue() : defaultValue;
+  }
+
+  private boolean isMandatoryFieldMissingOrEmpty(JsonNode document) {
+    return getMissingMandatoryField(document) != null || getEmptyMandatoryField(document) != null;
+  }
+
+  private String getMissingMandatoryField(JsonNode document) {
+    for (String field : mandatoryFields) {
+      if (!document.has(field)) {
+        return field;
+      }
+    }
+    return null;
+  }
+
+  private String getEmptyMandatoryField(JsonNode document) {
+    for (String field : mandatoryFields) {
+      if (document.has(field) && document.get(field).asText("") != null) {
+        return field;
+      }
+    }
+    return null;
+  }
+
+  @GetMapping(value = "/{id}", produces = MediaType.APPLICATION_JSON_VALUE)
+  public ResponseEntity<JsonNode> get(@PathVariable String id) throws IOException {
+    getDocumentCallsCounter.increment();
+    List<String> _id = List.of(id);
+    IdsQuery idsQuery = IdsQuery.of(builder -> builder.values(_id));
+    SearchRequest searchRequest = SearchRequest.of(
+        s -> s.index("steckbrief").from(0).size(_id.size()).query(Query.of(q -> q.ids(idsQuery))));
+    try {
+      SearchResponse<JsonNode> response = client.search(searchRequest, JsonNode.class);
+      List<JsonNode> responseObjects = response.documents();
+      if (responseObjects.isEmpty()) {
+        return ResponseEntity.notFound().build();
+      }
+      return ResponseEntity.ok(responseObjects.get(0));
+    } catch (OpenSearchException | IOException e) {
+      LOG.error("can't query OpenSearchServer due to " + e.getMessage(), e);
+      return ResponseEntity.status(HttpURLConnection.HTTP_UNAVAILABLE).build();
+    }
+  }
+
+  @DeleteMapping(value = "/{id}")
+  public ResponseEntity<Void> delete(@PathVariable String id) throws IOException {
+    LOG.info("Try to delete document {}", id);
+    deleteDocumentCallCounter.increment();
+    LOG.info("Try to delete document {}", id);
+    DeleteRequest request = new DeleteRequest.Builder().index("steckbrief").id(id).build();
+    DeleteResponse response = client.delete(request);
+    switch (response.result()) {
+      case Deleted:
+        DeleteRequest changesetRequest =
+            new DeleteRequest.Builder().index("changeset").id(id).build();
+        DeleteResponse changesetResponse = client.delete(changesetRequest);
+        if (changesetResponse.result() == Result.Deleted) {
+
+          LOG.info("Deleted document {} successfully", id);
+          return ResponseEntity.noContent().build();
+        } else {
+          LOG.warn("Could not delete document {}", id);
+          return ResponseEntity.notFound().build();
         }
-        else {
-            LOG.info("Received document with empty mandatory field in {}", document.toString());
-            error.put("error", "mandatory field '" + getEmptyMandatoryField(document) + "' is empty");
-        }
-        return error;
-    }
 
-    private JsonNode missingIdError(JsonNode document) {
-        LOG.info("Received document without or with empty id field in {}", document.toString());
-        ObjectNode newId = mapper.createObjectNode();
-        newId.put("id", UUID.randomUUID().toString());
-        return newId;
+      default:
+        LOG.warn("Could not delete document {}", id);
+        return ResponseEntity.notFound().build();
     }
-
-    private boolean isIdMissingOrEmpty(JsonNode document) {
-        return document.get("id") == null || StringUtils.isEmpty(document.get("id").asText(""));
-    }
-
-    private String getFieldOrElse(JsonNode json, String fieldName, String defaultValue) {
-        return json.has(fieldName) ? json.get(fieldName).textValue() : defaultValue;
-    }
-
-    private boolean isMandatoryFieldMissingOrEmpty(JsonNode document) {
-        return getMissingMandatoryField(document) != null || getEmptyMandatoryField(document) != null;
-    }
-
-    private String getMissingMandatoryField(JsonNode document) {
-        for (String field : mandatoryFields) {
-            if (!document.has(field)) {
-                return field;
-            }
-        }
-        return null;
-    }
-
-    private String getEmptyMandatoryField(JsonNode document) {
-        for (String field : mandatoryFields) {
-            if (document.has(field) && StringUtils.isEmpty(document.get(field).asText(""))) {
-                return field;
-            }
-        }
-        return null;
-    }
-
-    @GetMapping(value = "/{id}", produces = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity get(@PathVariable String id) throws IOException {
-        GetResponse getResponse = client.prepareGet("steckbrief", "steckbrief", id)
-                .execute()
-                .actionGet();
-
-        if (!getResponse.isExists()) {
-            return ResponseEntity.notFound().build();
-        }
-        counterService.increment("counter.calls.document.id.get");
-        return ResponseEntity.ok(mapper.readTree(getResponse.getSourceAsString()));
-    }
-
-    @DeleteMapping(value = "/{id}")
-    public ResponseEntity delete(@PathVariable String id) throws IOException {
-        LOG.info("Try to delete document {}", id);
-        counterService.increment("counter.calls.document.id.delete");
-        if (client.prepareDelete("steckbrief", "steckbrief", id).execute().actionGet().isFound()) {
-            new DeleteByQueryRequestBuilder(client, DeleteByQueryAction.INSTANCE)
-                    .setIndices("changeset")
-                    .setTypes("changeset")
-                    .setQuery(QueryBuilders.matchQuery("document", id))
-                    .execute()
-                    .actionGet();
-            LOG.info("Deleted document {} successfully", id);
-            return ResponseEntity.noContent().build();
-        }
-        else {
-            LOG.warn("Could not delete document {}", id);
-            return ResponseEntity.notFound().build();
-        }
-    }
+  }
 }
