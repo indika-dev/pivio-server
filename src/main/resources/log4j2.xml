@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration xmlns="https://logging.apache.org/xml/ns"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="https://logging.apache.org/xml/ns https://logging.apache.org/xml/ns/log4j-config-2.xsd"
+>
+  <Properties>
+    <Property name="filename">target/test.log</Property>
+  </Properties>
+
+  <Appenders>
+    <Console name="STDOUT">
+      <PatternLayout pattern="%d %p %c{1.} [%t] %m%n" />
+    </Console>
+
+    <File name="file" fileName="${filename}">
+      <PatternLayout>
+        <pattern>%d %p %c{1.} [%t] %m%n</pattern>
+      </PatternLayout>
+    </File>
+  </Appenders>
+
+  <Loggers>
+    <!-- 
+         loggers whose name starts with 'org.springframework' will only log messages of level "info" or
+    higher;
+         if you retrieve Loggers by using the class name (e.g. Logger.getLogger(AClass.class))
+         and if AClass is part of the org.springframework package, it will belong to this category
+    -->
+    <Logger name="org.springframework" level="INFO" additivity="false" />
+
+    <!--
+        Filter example: for loggers whose name starts with 'com.mycompany.myproduct',
+        log entries of level "debug" or higher whose ThreadContextMap data contains
+        the key-value pair "test=123", also send these log entries to the "STDOUT" appender.
+    -->
+    <Logger name="com.mycompany.myproduct" level="DEBUG" additivity="true">
+      <ThreadContextMapFilter>
+        <KeyValuePair key="test" value="123" />
+      </ThreadContextMapFilter>
+      <AppenderRef ref="STDOUT" />
+    </Logger>
+
+    <!--
+        By default, all log messages of level "trace" or higher will be logged.
+        Log messages are sent to the "file" appender and 
+        log messages of level "error" and higher will be sent to the "STDOUT" appender.
+    -->
+    <Root level="TRACE">
+      <AppenderRef ref="file" />
+      <AppenderRef ref="STDOUT" level="ERROR" />
+    </Root>
+  </Loggers>
+
+</Configuration>
