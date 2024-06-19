@@ -1,6 +1,7 @@
 package io.pivio.server.changeset;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.Assert.assertNotNull;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
@@ -11,8 +12,6 @@ import java.util.stream.Collectors;
 import org.joda.time.DateTime;
 import org.junit.Before;
 import org.junit.Test;
-import org.opensearch.client.opensearch.OpenSearchClient;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -32,9 +31,6 @@ public class ChangesetApiTest extends AbstractApiTestCase {
   private static final String ADD_OPERATION = "add";
   private static final String REMOVE_OPERATION = "remove";
   private static final String REPLACE_OPERATION = "replace";
-
-  @Autowired
-  private OpenSearchClient client;
 
   private ObjectNode document;
 
@@ -331,18 +327,16 @@ public class ChangesetApiTest extends AbstractApiTestCase {
 
   private void persistDocumentWithoutCreatingChangeset(JsonNode document)
       throws JsonProcessingException {
-    client.prepareIndex("steckbrief", "steckbrief", document.get("id").asText())
-        .setSource(document.toString()).execute().actionGet();
-    elasticsearchTemplate.refresh(PivioDocument.class);
+    assertNotNull(
+        elasticsearchTemplate.save(objectMapper.treeToValue(document, PivioDocument.class)));
+    elasticsearchTemplate.indexOps(PivioDocument.class).refresh();;
   }
 
   private void persistChangesets(Changeset... changesets) throws JsonProcessingException {
     for (Changeset changeset : changesets) {
-      client.prepareIndex("changeset", "changeset")
-          .setSource(objectMapper.writeValueAsString(changeset)).setCreate(true).execute()
-          .actionGet();
+      assertNotNull(elasticsearchTemplate.save(changeset));
     }
-    elasticsearchTemplate.refresh(Changeset.class);
+    elasticsearchTemplate.indexOps(Changeset.class).refresh();
   }
 
   private JsonNode getFirstChangesetOfDocumentWithSomeId() {
@@ -427,8 +421,9 @@ public class ChangesetApiTest extends AbstractApiTestCase {
   }
 
   private HttpStatus getHttpStatusOfChangesetSinceRequest(String sinceValue) {
-    return restTemplate.getForEntity(DOCUMENT_CHANGESET_URL_TEMPLATE + "?since={since}",
-        JsonNode.class, SOME_ID, sinceValue).getStatusCode();
+    return HttpStatus
+        .resolve(restTemplate.getForEntity(DOCUMENT_CHANGESET_URL_TEMPLATE + "?since={since}",
+            JsonNode.class, SOME_ID, sinceValue).getStatusCode().value());
   }
 
   private List<JsonNode> toList(JsonNode changesetsJson) {
