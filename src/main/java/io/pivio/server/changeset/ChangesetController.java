@@ -1,6 +1,8 @@
 package io.pivio.server.changeset;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import org.joda.time.DateTime;
 import org.opensearch.client.json.JsonData;
 import org.opensearch.client.opensearch.OpenSearchClient;
@@ -13,7 +15,9 @@ import org.opensearch.client.opensearch._types.query_dsl.MatchAllQuery;
 import org.opensearch.client.opensearch._types.query_dsl.MatchQuery;
 import org.opensearch.client.opensearch._types.query_dsl.Query;
 import org.opensearch.client.opensearch._types.query_dsl.RangeQuery;
-import org.opensearch.client.opensearch.core.SearchRequest;
+import org.opensearch.client.opensearch.core.SearchResponse;
+import org.opensearch.client.opensearch.core.pit.CreatePitResponse;
+import org.opensearch.client.opensearch.core.search.Pit;
 import org.opensearch.data.client.osc.OpenSearchTemplate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,6 +28,8 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -38,21 +44,23 @@ public class ChangesetController {
   private final ChangesetRepository repository;
   private final Counter getChangeSetCounter;
   private final Counter docIdChangeSetCounter;
-  private final OpenSearchTemplate changesetTemplate;
-  private final IndexQueryBuilder queryBuilder;
   private final OpenSearchClient client;
   private final ElasticsearchQueryHelper queryHelper;
+  private final ObjectMapper mapper;
+
+  private final SortOptions sortTimestampDesc = new SortOptions.Builder()
+      .field(new FieldSort.Builder().field("timestamp").order(SortOrder.Desc).build()).build();
+  private final Time stdScrollTime = Time.of(t -> t.offset(60000));
 
   public ChangesetController(ChangesetRepository repository, OpenSearchTemplate template,
       IndexQueryBuilder queryBuilder, MeterRegistry registry, OpenSearchClient client,
-      ElasticsearchQueryHelper queryHelper) {
+      ElasticsearchQueryHelper queryHelper, ObjectMapper mapper) {
     this.repository = repository;
     this.queryHelper = queryHelper;
     this.client = client;
-    this.queryBuilder = queryBuilder;
-    this.changesetTemplate = template;
     this.getChangeSetCounter = registry.counter("counter.calls.changeset.get");
     this.docIdChangeSetCounter = registry.counter("counter.calls.document.id.changeset.get");
+    this.mapper = mapper;
   }
 
   @GetMapping(value = "/changeset", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -65,12 +73,7 @@ public class ChangesetController {
     }
 
     LOG.debug("Retrieving changesets for all documents with since parameter {}", since);
-    SearchRequest searchRequest =
-        SearchRequest.of(s -> s.from(0).size(100).index("changeset").query(createQuery(since))
-            .sort(SortOptions
-                .of(o -> o.field(FieldSort.of(fs -> fs.field("timestamp").order(SortOrder.Desc)))))
-            .scroll(Time.of(t -> t.offset(60000))));
-    return queryHelper.retrieveAllDocuments(searchRequest);
+    return getSearchResponse(createQuery(since));
   }
 
   @GetMapping(value = "/document/{id}/changeset", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -90,10 +93,26 @@ public class ChangesetController {
     }
 
     LOG.debug("Retrieving changesets for document {} with since parameter {}", id, since);
-    return queryHelper.retrieveAllDocuments(new SearchRequest.Builder()
-        .index("changeset").sort(new SortOptions.Builder()
-            .field(f -> f.field("timestamp").order(SortOrder.Desc)).build())
-        .query(createQuery(id, since)).build());
+    return getSearchResponse(createQuery(id, since));
+  }
+
+  private ArrayNode getSearchResponse(Query searchQuery) throws IOException {
+    CreatePitResponse createPitResponse =
+        client.createPit(pit -> pit.keepAlive(stdScrollTime).targetIndexes("changeset"));
+    ArrayNode allDocuments = mapper.createArrayNode();
+    List<JsonNode> currentResultPage = new ArrayList<>(100);
+    Pit queryPit = Pit.of(builder -> builder.id(createPitResponse.pitId()));
+    SearchResponse<JsonNode> searchResponse = client.search(
+        request -> request.size(100).query(searchQuery).sort(sortTimestampDesc).pit(queryPit),
+        JsonNode.class);
+    while (!(currentResultPage = searchResponse.documents()).isEmpty()) {
+      allDocuments.addAll(currentResultPage);
+      String searchAfterParam = currentResultPage.getLast().get("timestamp").textValue();
+      searchResponse = client.search(request -> request.size(100).query(searchQuery)
+          .sort(sortTimestampDesc).pit(queryPit).searchAfter(searchAfterParam), JsonNode.class);
+    }
+    client.deletePit(request -> request.pitId(List.of(createPitResponse.pitId())));
+    return allDocuments;
   }
 
   private Query createQuery(String since) {
