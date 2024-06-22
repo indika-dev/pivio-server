@@ -4,8 +4,6 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.MediaType;
@@ -19,12 +17,12 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.servlet.http.HttpServletResponse;
+import lombok.extern.log4j.Log4j2;
 
 @CrossOrigin
 @RestController
+@Log4j2
 public class SearchQueryController {
-
-  private static final Logger LOG = LoggerFactory.getLogger(SearchQueryController.class);
 
   private final DocumentRepository documentRepository;
   private final ObjectMapper mapper;
@@ -46,7 +44,7 @@ public class SearchQueryController {
 
     getDocumentsCallCounter.increment();
     if (!isRequestValid(fields, sort)) {
-      LOG.info("Received search query with invalid parameters, fields: {}, sort: {}", fields, sort);
+      log.info("Received search query with invalid parameters, fields: {}, sort: {}", fields, sort);
       response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
       return null;
     }

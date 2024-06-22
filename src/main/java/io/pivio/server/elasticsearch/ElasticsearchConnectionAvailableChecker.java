@@ -5,15 +5,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import org.opensearch.client.opensearch.OpenSearchClient;
 import org.opensearch.client.opensearch._types.OpenSearchException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import lombok.extern.log4j.Log4j2;
 
 @Component
+@Log4j2
 public class ElasticsearchConnectionAvailableChecker {
-
-  private static final Logger log =
-      LoggerFactory.getLogger(ElasticsearchConnectionAvailableChecker.class);
 
   private OpenSearchClient client;
 

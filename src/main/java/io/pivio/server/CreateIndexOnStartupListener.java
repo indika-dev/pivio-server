@@ -26,7 +26,7 @@ public class CreateIndexOnStartupListener implements ApplicationListener<Context
   @Override
   public void onApplicationEvent(ContextRefreshedEvent event) {
     if (!elasticsearchConnectionAvailableChecker.isConnectionToElasticsearchAvailable()) {
-      throw createAndLogIllegalStateException(
+      throw createAndlogIllegalStateException(
           "cannot create Elasticsearch indices and mappings for PivioDocument and Changeset as no connection to Elasticsearch is available");
     }
     try {
@@ -36,7 +36,7 @@ public class CreateIndexOnStartupListener implements ApplicationListener<Context
     }
   }
 
-  private RuntimeException createAndLogIllegalStateException(String message) {
+  private RuntimeException createAndlogIllegalStateException(String message) {
     RuntimeException ise = new IllegalStateException(message);
     log.error(message, ise);
     return ise;

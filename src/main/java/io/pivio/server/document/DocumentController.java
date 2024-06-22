@@ -15,13 +15,11 @@ import org.opensearch.client.opensearch._types.query_dsl.IdsQuery;
 import org.opensearch.client.opensearch._types.query_dsl.Query;
 import org.opensearch.client.opensearch.core.DeleteRequest;
 import org.opensearch.client.opensearch.core.DeleteResponse;
-import org.opensearch.client.opensearch.core.IndexRequest;
 import org.opensearch.client.opensearch.core.IndexResponse;
 import org.opensearch.client.opensearch.core.SearchRequest;
 import org.opensearch.client.opensearch.core.SearchResponse;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.CrossOrigin;
@@ -40,44 +38,44 @@ import com.fasterxml.jackson.databind.node.JsonNodeType;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
-import io.pivio.server.changeset.ChangesetRepository;
 import io.pivio.server.changeset.ChangesetService;
 import io.pivio.server.changeset.DocumentNotFoundException;
 import io.pivio.server.elasticsearch.Changeset;
+import lombok.extern.log4j.Log4j2;
 
 @CrossOrigin
 @RestController
 @RequestMapping(value = "/document")
+@Log4j2
 public class DocumentController {
 
-  private static final Logger LOG = LoggerFactory.getLogger(DocumentController.class);
-
-  private final ChangesetRepository changesetRepository;
-  private final DocumentRepository repository;
   private final ChangesetService changesetService;
-  private final List<String> mandatoryFields;
+  private final List<String> mandatoryFields =
+      Arrays.asList("id", "type", "name", "owner", "description");
   private final JsonMapper mapper;
   private final OpenSearchClient client;
 
   @Autowired
   public ObjectMapper objectMapper;
 
+  @Value("#{pivioIndex}")
+  private String pivioIndex;
+
+  @Value("#{changesetIndex}")
+  private String changesetIndex;
+
   private Counter postDocumentCallsCounter;
   private Counter deleteDocumentCallCounter;
   private Counter getDocumentCallsCounter;
 
-  public DocumentController(DocumentRepository repository, ChangesetRepository changesetRepository,
-      ChangesetService changesetService, JsonMapper mapper, MeterRegistry registry,
-      OpenSearchClient client) {
-    this.changesetRepository = changesetRepository;
+  public DocumentController(ChangesetService changesetService, JsonMapper mapper,
+      MeterRegistry registry, OpenSearchClient client) {
     this.client = client;
-    this.repository = repository;
     this.changesetService = changesetService;
     this.mapper = mapper;
     this.postDocumentCallsCounter = registry.counter("counter.calls.document.post");
     this.deleteDocumentCallCounter = registry.counter("counter.calls.document.id.delete");
     this.getDocumentCallsCounter = registry.counter("counter.calls.document.id.get");
-    mandatoryFields = Arrays.asList("id", "type", "name", "owner", "description");
   }
 
   @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE,
@@ -99,17 +97,23 @@ public class DocumentController {
 
     final Changeset changeset = changesetService.computeNext(document);
     final String documentId = document.get("id").asText();
-    final Optional<Changeset> existingPivioDocument = changesetRepository.findById(documentId);
+    final SearchResponse<JsonNode> existingPivioDocumentResponse = client.search(
+        request -> request.index(changesetIndex).from(0).size(100)
+            .query(query -> query.ids(new IdsQuery.Builder().values(documentId).build())),
+        JsonNode.class);
+    final Optional<JsonNode> existingPivioDocument =
+        Optional.ofNullable(existingPivioDocumentResponse.hits().hits().size() == 1
+            ? objectMapper.readTree(existingPivioDocumentResponse.hits().hits().getFirst().node())
+            : null);
 
     final String formattedChangeTime = ISODateTimeFormat.dateTime().print(changeset.getTimestamp());
     existingPivioDocument.ifPresentOrElse(persistedPivioDocument -> {
-      JsonNode persistentPivioDocumentJson = mapper.valueToTree(persistedPivioDocument);
       document.put("created",
-          getFieldOrElse(persistentPivioDocumentJson, "created", formattedChangeTime));
+          getFieldOrElse(persistedPivioDocument, "created", formattedChangeTime));
       document.put("lastUpload", ISODateTimeFormat.dateTime().print(changeset.getTimestamp()));
       if (changeset.isEmpty()) {
         document.put("lastUpdate",
-            getFieldOrElse(persistentPivioDocumentJson, "lastUpdate", formattedChangeTime));
+            getFieldOrElse(persistedPivioDocument, "lastUpdate", formattedChangeTime));
       } else {
         document.put("lastUpdate", formattedChangeTime);
       }
@@ -118,9 +122,8 @@ public class DocumentController {
       document.put("lastUpdate", formattedChangeTime);
       document.put("lastUpload", formattedChangeTime);
     });
-    IndexRequest<Object> indexRequest = new IndexRequest.Builder<>().index("steckbrief")
-        .id(document.get("id").textValue()).document(document).build();
-    IndexResponse indexResponse = client.index(indexRequest);
+    IndexResponse indexResponse =
+        client.index(request -> request.index(pivioIndex).id(documentId).document(document));
     switch (indexResponse.result()) {
       case NoOp:
       case NotFound:
@@ -129,15 +132,12 @@ public class DocumentController {
       case Created:
       case Updated:
       case Deleted:
-        LOG.info("indexed {} successfully with result: {}", document.get("id"),
+        log.info("indexed {} successfully with result: {}", document.get("id"),
             indexResponse.result());
     }
-    PivioDocument persistedPivioDocument =
-        repository.save(mapper.treeToValue(document, PivioDocument.class));
     if (!changeset.isEmpty()) {
-      IndexRequest<Object> changesetIndexRequest = new IndexRequest.Builder<>().index("changeset")
-          .document(mapper.writeValueAsString(changeset)).build();
-      IndexResponse changesetIndexResponse = client.index(changesetIndexRequest);
+      IndexResponse changesetIndexResponse =
+          client.index(request -> request.index(changesetIndex).document(changeset));
       switch (changesetIndexResponse.result()) {
         case NoOp:
         case NotFound:
@@ -146,11 +146,11 @@ public class DocumentController {
         case Created:
         case Updated:
         case Deleted:
-          LOG.info("indexed {} successfully with result: {}", document.get("id"),
+          log.info("indexed {} successfully with result: {}", document.get("id"),
               indexResponse.result());
       }
     }
-    // LOG.info("Indexed document {} for {}", documentId, document.get("name").asText());
+    // log.info("Indexed document {} for {}", documentId, document.get("name").asText());
     return ResponseEntity
         .created(uriBuilder.path("/document/{documentId}").buildAndExpand(documentId).toUri())
         .build();
@@ -178,17 +178,17 @@ public class DocumentController {
     ObjectNode error = mapper.createObjectNode();
     String missingMandatoryField = getMissingMandatoryField(document);
     if (missingMandatoryField != null) {
-      LOG.info("Received document with missing mandatory field in {}", document.toString());
+      log.info("Received document with missing mandatory field in {}", document.toString());
       error.put("error", "mandatory field '" + missingMandatoryField + "' is missing");
     } else {
-      LOG.info("Received document with empty mandatory field in {}", document.toString());
+      log.info("Received document with empty mandatory field in {}", document.toString());
       error.put("error", "mandatory field '" + getEmptyMandatoryField(document) + "' is empty");
     }
     return error;
   }
 
   private JsonNode missingIdError(JsonNode document) {
-    LOG.info("Received document without or with empty id field in {}", document.toString());
+    log.info("Received document without or with empty id field in {}", document.toString());
     ObjectNode newId = mapper.createObjectNode();
     newId.put("id", UUID.randomUUID().toString());
     return newId;
@@ -239,16 +239,16 @@ public class DocumentController {
       }
       return ResponseEntity.ok(responseObjects.get(0));
     } catch (OpenSearchException | IOException e) {
-      LOG.error("can't query OpenSearchServer due to " + e.getMessage(), e);
+      log.error("can't query OpenSearchServer due to " + e.getMessage(), e);
       return ResponseEntity.status(HttpURLConnection.HTTP_UNAVAILABLE).build();
     }
   }
 
   @DeleteMapping(value = "/{id}")
   public ResponseEntity<Void> delete(@PathVariable String id) throws IOException {
-    LOG.info("Try to delete document {}", id);
+    log.info("Try to delete document {}", id);
     deleteDocumentCallCounter.increment();
-    LOG.info("Try to delete document {}", id);
+    log.info("Try to delete document {}", id);
     DeleteRequest request = new DeleteRequest.Builder().index("steckbrief").id(id).build();
     DeleteResponse response = client.delete(request);
     switch (response.result()) {
@@ -258,15 +258,15 @@ public class DocumentController {
         DeleteResponse changesetResponse = client.delete(changesetRequest);
         if (changesetResponse.result() == Result.Deleted) {
 
-          LOG.info("Deleted document {} successfully", id);
+          log.info("Deleted document {} successfully", id);
           return ResponseEntity.noContent().build();
         } else {
-          LOG.warn("Could not delete document {}", id);
+          log.warn("Could not delete document {}", id);
           return ResponseEntity.notFound().build();
         }
 
       default:
-        LOG.warn("Could not delete document {}", id);
+        log.warn("Could not delete document {}", id);
         return ResponseEntity.notFound().build();
     }
   }

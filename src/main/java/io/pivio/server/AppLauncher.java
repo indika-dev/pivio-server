@@ -12,7 +12,8 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.log4j.Log4j2;
 
 @Log4j2
-@SpringBootApplication(exclude = {ElasticsearchDataAutoConfiguration.class})
+@SpringBootApplication(exclude = {ElasticsearchDataAutoConfiguration.class},
+    scanBasePackageClasses = {PivioServerConfig.class})
 public class AppLauncher {
 
   @Autowired

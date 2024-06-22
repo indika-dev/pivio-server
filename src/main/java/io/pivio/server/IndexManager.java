@@ -37,7 +37,6 @@ public class IndexManager {
   private OpenSearchClient searchClient;
 
   public void setUpIndices() throws IOException {
-
     log.info("Creating index for documents");
     create("steckbrief", "steckbrief-index-opensearch.json");
     log.info("Creating index for changesets");
@@ -45,7 +44,6 @@ public class IndexManager {
   }
 
   protected void create(String indexName, String indexFilename) throws IOException {
-
     DeleteIndexRequest deleteIndexRequest =
         new DeleteIndexRequest.Builder().index(indexName).build();
     searchClient.indices().delete(deleteIndexRequest);
