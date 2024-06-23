@@ -3,9 +3,13 @@ services:
     build: .
     ports:
       - "9123:9123"
-    links:
+    depends_on:
       - elasticsearch
 
   elasticsearch:
-    image: opensearchproject/opensearch:2.14.0
-    command: ["/bin/sh", "-c", "gosu elasticsearch elasticsearch"]
+    image: docker.io/opensearchproject/opensearch:2.14.0
+    environment:
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=öasjdfzxdk_I34
+      - discovery.type=single-node
+    command:
+      ["/bin/sh", "-c", "/usr/share/opensearch/opensearch-docker-entrypoint.sh"]

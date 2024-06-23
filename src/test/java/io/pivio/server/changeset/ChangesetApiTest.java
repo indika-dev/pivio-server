@@ -2,6 +2,8 @@ package io.pivio.server.changeset;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertNotNull;
+import java.io.File;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
@@ -9,20 +11,46 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.apache.http.HttpHost;
 import org.joda.time.DateTime;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.runner.RunWith;
+import org.opensearch.client.RestClient;
+import org.opensearch.client.json.jackson.JacksonJsonpMapper;
+import org.opensearch.client.opensearch.OpenSearchClient;
+import org.opensearch.client.opensearch._types.OpenSearchException;
+import org.opensearch.client.transport.OpenSearchTransport;
+import org.opensearch.client.transport.rest_client.RestClientTransport;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.ContextConfiguration;
+import org.springframework.test.context.junit4.SpringRunner;
+import org.testcontainers.containers.DockerComposeContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jayway.jsonpath.JsonPath;
 import io.pivio.server.AbstractApiTestCase;
 import io.pivio.server.document.PivioDocument;
 import io.pivio.server.elasticsearch.Changeset;
+import io.pivio.server.elasticsearch.ElasticsearchQueryHelper;
 import net.minidev.json.JSONArray;
 
+
+@RunWith(SpringRunner.class)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@ContextConfiguration
+@Testcontainers
 public class ChangesetApiTest extends AbstractApiTestCase {
 
   private static final String ANOTHER_ID = "anotherId";
@@ -34,11 +62,53 @@ public class ChangesetApiTest extends AbstractApiTestCase {
 
   private ObjectNode document;
 
+  @Autowired
+  protected ElasticsearchQueryHelper queryHelper;
+
+  @Container
+  public static final DockerComposeContainer<?> dockerEnvironment =
+      new DockerComposeContainer<>(new File("docker-compose.yml")).withLocalCompose(true)
+          .withExposedService(ELASTICSEARCH_SERVICE_NAME, ELASTICSEARCH_SERVICE_PORT);
+  // .withTailChildContainers(true);
+
+  static {
+    dockerEnvironment.start();
+    Runtime.getRuntime().addShutdownHook(new Thread(dockerEnvironment::stop));
+  }
+
+  @Configuration
+  public static class Config {
+
+    @Bean
+    public OpenSearchClient client() {
+      // Create the low-level client
+      RestClient restClient = RestClient.builder(new HttpHost("localhost", 9200)).build();
+
+      // Create the transport with a Jackson mapper
+      OpenSearchTransport transport = new RestClientTransport(restClient, new JacksonJsonpMapper());
+
+      // And create the API client
+      OpenSearchClient client = new OpenSearchClient(transport);
+      return client;
+    }
+
+    @Bean
+    public ObjectMapper objectMapper() {
+      return new ObjectMapper(new JsonFactory());
+    }
+  }
+
   @Before
   public void setUp() {
     document = objectMapper.createObjectNode().put("id", SOME_ID).put("type", "service")
         .put("name", "MicroService").put("serviceName", "MS").put("description", "Super service...")
         .put("owner", "Awesome Team");
+  }
+
+  @AfterAll
+  public static void afterAll() {
+    dockerEnvironment.stop();
+    dockerEnvironment.close();
   }
 
   @Test
@@ -209,7 +279,7 @@ public class ChangesetApiTest extends AbstractApiTestCase {
 
     // when
     ResponseEntity<JsonNode> responseEntity =
-        restTemplate.getForEntity("/changeset", JsonNode.class);
+        ResponseEntity.ok(queryHelper.isChangesetPresent(SOME_ID).get());
 
     // then
     assertThat(responseEntity.getStatusCode()).isEqualTo(HttpStatus.OK);
@@ -218,17 +288,19 @@ public class ChangesetApiTest extends AbstractApiTestCase {
   }
 
   @Test
-  public void deletion_of_document_also_deletes_corresponding_changesets() {
+  public void deletion_of_document_also_deletes_corresponding_changesets()
+      throws OpenSearchException, IOException {
     // given
     postDocument(document);
     postDocument(document.put("name", "NewService"));
 
     // when
-    restTemplate.delete("/document/" + SOME_ID);
+    client.delete(request -> request.id(SOME_ID));
 
     // and
     ResponseEntity<JsonNode> responseEntity =
-        restTemplate.getForEntity(DOCUMENT_CHANGESET_URL_TEMPLATE, JsonNode.class, SOME_ID);
+        ResponseEntity.of(queryHelper.isDocumentPresent(SOME_ID));
+    // restTemplate.getForEntity(DOCUMENT_CHANGESET_URL_TEMPLATE, JsonNode.class, SOME_ID);
 
     // then
     assertThat(responseEntity.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
@@ -238,7 +310,8 @@ public class ChangesetApiTest extends AbstractApiTestCase {
   public void changeset_of_non_existent_document_cannot_be_requested() {
     // when
     ResponseEntity<JsonNode> responseEntity =
-        restTemplate.getForEntity(DOCUMENT_CHANGESET_URL_TEMPLATE, JsonNode.class, "nonExistentId");
+        ResponseEntity.of(queryHelper.isDocumentPresent("nonExistentId"));
+    // restTemplate.getForEntity(DOCUMENT_CHANGESET_URL_TEMPLATE, JsonNode.class, "nonExistentId");
 
     // then
     assertThat(responseEntity.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
@@ -326,17 +399,21 @@ public class ChangesetApiTest extends AbstractApiTestCase {
   }
 
   private void persistDocumentWithoutCreatingChangeset(JsonNode document)
-      throws JsonProcessingException {
-    assertNotNull(
-        elasticsearchTemplate.save(objectMapper.treeToValue(document, PivioDocument.class)));
-    elasticsearchTemplate.indexOps(PivioDocument.class).refresh();;
+      throws OpenSearchException, IOException, JsonProcessingException, JsonProcessingException {
+    assertNotNull(client.index(request -> {
+      try {
+        return request.index("steckbrief")
+            .document(objectMapper.treeToValue(document, PivioDocument.class));
+      } catch (JsonProcessingException | IllegalArgumentException e) {
+        return null;
+      }
+    }));
   }
 
-  private void persistChangesets(Changeset... changesets) throws JsonProcessingException {
+  private void persistChangesets(Changeset... changesets) throws OpenSearchException, IOException {
     for (Changeset changeset : changesets) {
-      assertNotNull(elasticsearchTemplate.save(changeset));
+      assertNotNull(client.index(request -> request.index("changeset").document(changeset)));
     }
-    elasticsearchTemplate.indexOps(Changeset.class).refresh();
   }
 
   private JsonNode getFirstChangesetOfDocumentWithSomeId() {

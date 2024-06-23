@@ -26,9 +26,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.pivio.server.document.PivioDocument;
-import lombok.extern.log4j.log4j2;
+import lombok.extern.log4j.Log4j2;
 
-@log4j2
+@Log4j2
 @Component
 public class ElasticsearchQueryHelper {
 
